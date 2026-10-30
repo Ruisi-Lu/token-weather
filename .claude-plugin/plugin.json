@@ -1,0 +1,19 @@
+{
+  "name": "token-weather",
+  "displayName": "Token Weather",
+  "version": "0.1.0",
+  "description": "A live forecast of the context window, drawn in the band above the prompt.",
+  "author": {
+    "name": "Ruisi Lu",
+    "url": "https://github.com/Ruisi-Lu"
+  },
+  "homepage": "https://github.com/Ruisi-Lu/token-weather#readme",
+  "repository": "https://github.com/Ruisi-Lu/token-weather",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "statusline",
+    "mod"
+  ],
+  "types": "./types/index.d.ts"
+}
