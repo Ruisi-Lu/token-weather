@@ -1,7 +1,7 @@
 {
   "name": "token-weather",
   "displayName": "Token Weather",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A live forecast of the context window, drawn in the band above the prompt.",
   "author": {
     "name": "Ruisi Lu",
@@ -14,6 +14,5 @@
     "context",
     "statusline",
     "mod"
-  ],
-  "types": "./types/index.d.ts"
+  ]
 }
