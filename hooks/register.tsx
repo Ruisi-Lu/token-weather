@@ -4,12 +4,14 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import {
   barFor,
   compactAtOf,
+  effortOf,
   formatDelta,
-  formatLimit,
   formatTokens,
   limitColor,
+  limitParts,
   limitOf,
   limitsOf,
+  modelName,
   percentOf,
   record,
   sampleOf,
@@ -21,6 +23,7 @@ const samples = atom({ plugin: 'token-weather', key: 'samples' } as const, [])
 const turn = atom({ plugin: 'token-weather', key: 'turn' } as const, null)
 const compactAt = atom({ plugin: 'token-weather', key: 'compactAt' } as const, null)
 const limits = atom({ plugin: 'token-weather', key: 'limits' } as const, [])
+const engine = atom({ plugin: 'token-weather', key: 'engine' } as const, null)
 
 // The auto-compact point, from the local /context estimate; it sends no request.
 async function refreshCompactAt($: EngineInterface): Promise<void> {
@@ -45,6 +48,12 @@ export const register: Register = on => {
 
     await refreshCompactAt($)
     try {
+      const model = await $.session.model()
+      await update($, engine, now => now ?? { model, effort: null })
+    } catch {
+      // The first request names it instead.
+    }
+    try {
       const { rateLimits } = await $.session.usage()
       await update($, limits, () => limitsOf(rateLimits))
     } catch {
@@ -62,6 +71,16 @@ export const register: Register = on => {
 
   // Every model response inside a turn moves the window, so the band follows each one.
   on('turn.step', async function* ($, e, next) {
+    // The model and effort this request goes out with, as the engine resolved them.
+    if (e.agentId === undefined) {
+      const now = { model: e.model, effort: effortOf(e.effort) }
+      try {
+        await update($, engine, was => (was?.model === now.model && was.effort === now.effort ? was : now))
+      } catch {
+        // The band keeps the last one it knew.
+      }
+    }
+
     const result = yield* next(e)
 
     // Subagents run in windows of their own; only the main loop's counts.
@@ -117,34 +136,50 @@ export const register: Register = on => {
     const list = await read($, samples)
     const at = await read($, compactAt)
     const windows = await read($, limits)
+    const running = await read($, engine)
     const now = windows.length > 0 ? await $.clock.now() : 0
     const latest = list.at(-1)
     const { Box, Text } = $.ui.resolve(e)
 
     const window = latest?.window ?? (await $.session.usage()).context.window
     const limit = limitOf(window, at)
-    const scale = (
-      <Text>
-        {formatTokens(limit)}
-        {limit < window && <Text dimColor> compact · {formatTokens(window)} max</Text>}
+
+    // The second line: the model and effort, then the five-hour and weekly windows, quiet until one fills.
+    const limitsLine = (running !== null || windows.length > 0) && (
+      <Text wrap="truncate-end">
+        {running !== null && (
+          <Text dimColor>
+            {'  '}
+            {modelName(running.model)}
+            {running.effort === null ? '' : ` · ${running.effort}`}
+          </Text>
+        )}
+        {windows.map((w, i) => {
+          const parts = limitParts(w, now)
+          const color = limitColor(w.percentUsed)
+          return (
+            <Text>
+              <Text dimColor>
+                {i === 0 && running === null ? '  ' : '    '}
+                {parts.label}{' '}
+              </Text>
+              {color === undefined
+                ? <Text dimColor>{parts.meter} {parts.used}</Text>
+                : <Text color={color}>{parts.meter} {parts.used}</Text>}
+              {parts.resets !== undefined && <Text dimColor> · resets {parts.resets}</Text>}
+            </Text>
+          )
+        })}
       </Text>
     )
-    const rateLimits = windows.map(w => (
-      <Text>
-        {'  '}
-        <Text color={limitColor(w.percentUsed)}>{formatLimit(w, now)}</Text>
-      </Text>
-    ))
 
     if (latest === undefined) {
       return (
-        <Box>
-          <Text wrap="truncate-end">
-            <Text dimColor>☀ Clear{'  '}— / </Text>
-            {scale}
-            <Text dimColor>{'  '}waiting for the first response</Text>
-            {rateLimits}
+        <Box flexDirection="column">
+          <Text wrap="truncate-end" dimColor>
+            ☀ Clear{'  '}— / {formatTokens(limit)}{'  '}waiting for the first response
           </Text>
+          {limitsLine}
         </Box>
       )
     }
@@ -155,17 +190,16 @@ export const register: Register = on => {
     const weather = weatherFor(percent)
 
     return (
-      <Box>
+      <Box flexDirection="column">
         <Text wrap="truncate-end">
           <Text color={weather.color} bold>
             {weather.icon} {weather.word}
           </Text>
           <Text>
             {'  '}
-            {percent}% · {formatTokens(latest.tokens)} /{' '}
+            {percent}% · {formatTokens(latest.tokens)} / {formatTokens(limit)}
+            {'  '}
           </Text>
-          {scale}
-          <Text>{'  '}</Text>
           {list.map(sample => {
             const p = percentOf(sample.tokens, limitOf(sample.window, at))
             return <Text color={weatherFor(p).color}>{barFor(p)}</Text>
@@ -176,8 +210,8 @@ export const register: Register = on => {
               {formatDelta(latest.tokens - previous.tokens, isLive ? 'this turn' : 'last turn')}
             </Text>
           )}
-          {rateLimits}
         </Text>
+        {limitsLine}
       </Box>
     )
   })

@@ -89,11 +89,20 @@ export function limitsOf(rateLimits: readonly SessionRateLimit[]): Limit[] {
   })
 }
 
-export function limitColor(percentUsed: number): string {
-  if (percentUsed < 50) return 'green'
+// Quiet while there is room; colored once a window is past half.
+export function limitColor(percentUsed: number): string | undefined {
+  if (percentUsed < 50) return undefined
   if (percentUsed < 80) return 'yellow'
   if (percentUsed < 95) return 'magenta'
   return 'red'
+}
+
+const METER_CELLS = 5
+
+// A five-cell meter, one cell to each fifth used: 83% -> "▰▰▰▰▱".
+export function meterFor(percentUsed: number): string {
+  const filled = Math.min(METER_CELLS, Math.max(0, Math.round(percentUsed / (100 / METER_CELLS))))
+  return '▰'.repeat(filled) + '▱'.repeat(METER_CELLS - filled)
 }
 
 // Time left until a reset, to the minute: "42m", "2h10m", "3d4h".
@@ -105,10 +114,36 @@ export function formatRemaining(ms: number): string {
   return `${Math.floor(hours / 24)}d${hours % 24}h`
 }
 
-// "5h 23% ↻2h10m": the window, how much is used and, when known, how long until it resets.
-export function formatLimit(limit: Limit, now: number): string {
-  const label = LIMIT_LABELS[limit.kind] ?? limit.kind
-  const used = `${label} ${Math.round(limit.percentUsed)}%`
+export type LimitParts = { label: string; meter: string; used: string; resets?: string }
+
+// "5h ▰▰▰▰▱ 83% · resets 2h10m", in parts so the meter can carry its own color.
+export function limitParts(limit: Limit, now: number): LimitParts {
+  const parts = {
+    label: LIMIT_LABELS[limit.kind] ?? limit.kind,
+    meter: meterFor(limit.percentUsed),
+    used: `${Math.round(limit.percentUsed)}%`,
+  }
   const resetsAt = limit.resetsAt === undefined ? Number.NaN : Date.parse(limit.resetsAt)
-  return Number.isNaN(resetsAt) ? used : `${used} ↻${formatRemaining(resetsAt - now)}`
+  return Number.isNaN(resetsAt) ? parts : { ...parts, resets: formatRemaining(resetsAt - now) }
+}
+
+export function formatLimit(limit: Limit, now: number): string {
+  const { label, meter, used, resets } = limitParts(limit, now)
+  return `${label} ${meter} ${used}${resets === undefined ? '' : ` · resets ${resets}`}`
+}
+
+const FAMILIES: Record<string, string> = { opus: 'Opus', sonnet: 'Sonnet', haiku: 'Haiku', fable: 'Fable' }
+
+// "claude-opus-5-5" -> "Opus 5.5", "claude-sonnet-5-5-20261001[1m]" -> "Sonnet 5.5 1M"; anything else as it is.
+export function modelName(id: string): string {
+  const match = /^(?:claude-)?([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i.exec(id.trim())
+  const family = match?.[1] === undefined ? undefined : FAMILIES[match[1].toLowerCase()]
+  if (match === null || family === undefined) return id
+  const version = match[3] === undefined ? match[2] : `${match[2]}.${match[3]}`
+  return `${family} ${version}${match[4] === undefined ? '' : ' 1M'}`
+}
+
+// A numeric effort reads as its number; none, as nothing.
+export function effortOf(effort: string | number | undefined): string | null {
+  return effort === undefined ? null : String(effort)
 }

@@ -6,10 +6,13 @@ import {
   barFor,
   compactAtOf,
   formatDelta,
+  effortOf,
   formatLimit,
   formatRemaining,
   formatTokens,
   limitColor,
+  meterFor,
+  modelName,
   limitOf,
   limitsOf,
   percentOf,
@@ -69,8 +72,15 @@ const RATE_LIMITS: SessionRateLimit[] = [
 ]
 
 // Raises one model request of a turn and reads its stream to the end, as the query loop does.
-async function step($: Engine, turnId: string, index: number, agentId?: string) {
-  const stream = $.turn.step({ turnId, index, model: 'claude-test', messageCount: 1, ...(agentId === undefined ? {} : { agentId }) })
+async function step($: Engine, turnId: string, index: number, agentId?: string, request: { model?: string; effort?: 'high' } = {}) {
+  const stream = $.turn.step({
+    turnId,
+    index,
+    model: request.model ?? 'claude-test',
+    ...(request.effort === undefined ? {} : { effort: request.effort }),
+    messageCount: 1,
+    ...(agentId === undefined ? {} : { agentId }),
+  })
   for await (const _ of stream) {
     // The chunks are the engine's; only the result matters here.
   }
@@ -132,17 +142,30 @@ describe('forecast', () => {
     expect(percentOf(1, 0)).toBe(0)
   })
 
-  test('rate limits read like 5h 83% ↻2h10m', async () => {
+  test('rate limits read like 5h ▰▰▰▰▱ 83% · resets 2h10m', async () => {
     const windows = limitsOf(RATE_LIMITS)
     expect(windows.map(w => w.kind)).toEqual(['five_hour', 'seven_day'])
-    expect(windows.map(w => formatLimit(w, NOW))).toEqual(['5h 83% ↻2h10m', '7d 41% ↻3d4h'])
-    expect(formatLimit({ kind: 'five_hour', percentUsed: 7 }, NOW)).toBe('5h 7%')
+    expect(windows.map(w => formatLimit(w, NOW))).toEqual(['5h ▰▰▰▰▱ 83% · resets 2h10m', '7d ▰▰▱▱▱ 41% · resets 3d4h'])
+    expect(formatLimit({ kind: 'five_hour', percentUsed: 7 }, NOW)).toBe('5h ▱▱▱▱▱ 7%')
+    expect([0, 9, 10, 50, 100, 120].map(meterFor)).toEqual(['▱▱▱▱▱', '▱▱▱▱▱', '▰▱▱▱▱', '▰▰▰▱▱', '▰▰▰▰▰', '▰▰▰▰▰'])
     expect(formatRemaining(0)).toBe('0m')
     expect(formatRemaining(-5_000)).toBe('0m')
     expect(formatRemaining(41 * 60_000 + 1)).toBe('42m')
     expect(formatRemaining(60 * 60_000)).toBe('1h00m')
     expect(formatRemaining(24 * 3_600_000)).toBe('1d0h')
-    expect([10, 50, 80, 95].map(limitColor)).toEqual(['green', 'yellow', 'magenta', 'red'])
+    expect([10, 50, 80, 95].map(limitColor)).toEqual([undefined, 'yellow', 'magenta', 'red'])
+  })
+
+  test('models read like Opus 5.5', async () => {
+    expect(modelName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(modelName('claude-sonnet-5-5-20261001')).toBe('Sonnet 5.5')
+    expect(modelName('claude-haiku-5-5[1m]')).toBe('Haiku 5.5 1M')
+    expect(modelName('claude-opus-5')).toBe('Opus 5')
+    expect(modelName('claude-test')).toBe('claude-test')
+    expect(modelName('gpt-5')).toBe('gpt-5')
+    expect(effortOf('high')).toBe('high')
+    expect(effortOf(42)).toBe('42')
+    expect(effortOf(undefined)).toBeNull()
   })
 })
 
@@ -273,13 +296,13 @@ describe('band', () => {
     await $.session.start({ cwd: '/', surface: null, isInteractive: true })
     const waiting = await $.ui.mount({ plugin: 'token-weather', surface: 'terminal', ...BAND })
     expect((await waiting.find({ type: 'Text', text: /waiting/ }))?.text).toBe(
-      '☀ Clear  — / 167k compact · 200k max  waiting for the first response',
+      '☀ Clear  — / 167k  waiting for the first response',
     )
     await waiting.unmount()
 
     await $.turn.start({ text: 'one', turnId: 't1' })
     answer = 150_300
-    await step($, 't1', 0)
+    await step($, 't1', 0, undefined, { model: 'claude-opus-5-5', effort: 'high' })
     context = { window: 200_000, tokens: 150_300, percent: 75 }
     rateLimits = RATE_LIMITS
     await $.session.measure({ context, rateLimits, changed: ['context', 'rateLimits'] })
@@ -287,17 +310,19 @@ describe('band', () => {
     for (const surface of ['terminal', 'desktop'] as const) {
       const ui = await $.ui.mount({ plugin: 'token-weather', surface, ...BAND })
       const line = (await ui.find({ type: 'Text', text: /Compact soon/ }))?.text
-      expect(line).toBe('↯ Compact soon  90% · 150.3k / 167k compact · 200k max  █  5h 83% ↻2h10m  7d 41% ↻3d4h')
+      expect(line).toBe('↯ Compact soon  90% · 150.3k / 167k  █')
+      const second = (await ui.find({ type: 'Text', text: /^  Opus/ }))?.text
+      expect(second).toBe('  Opus 5.5 · high    5h ▰▰▰▰▱ 83% · resets 2h10m    7d ▰▰▱▱▱ 41% · resets 3d4h')
       const texts = await ui.findAll({ type: 'Text' })
-      expect(texts.find(t => t.text === '5h 83% ↻2h10m')?.props.color).toBe('magenta')
-      expect(texts.find(t => t.text === '7d 41% ↻3d4h')?.props.color).toBe('green')
+      expect(texts.find(t => t.text === '▰▰▰▰▱ 83%')?.props.color).toBe('magenta')
+      expect(texts.find(t => t.text === '▰▰▱▱▱ 41%')?.props.dimColor).toBe(true)
       await ui.unmount()
     }
 
     // The countdown follows the clock.
     await clock.advance(60 * 60_000)
     const later = await $.ui.mount({ plugin: 'token-weather', surface: 'terminal', ...BAND })
-    expect((await later.find({ type: 'Text', text: /Compact soon/ }))?.text).toContain('5h 83% ↻1h10m  7d 41% ↻3d3h')
+    expect((await later.find({ type: 'Text', text: /^  Opus/ }))?.text).toContain('resets 1h10m    7d ▰▰▱▱▱ 41% · resets 3d3h')
     await later.unmount()
   })
 })
