@@ -1,8 +1,8 @@
 {
   "name": "token-weather",
   "displayName": "Token Weather",
-  "version": "0.1.1",
-  "description": "A live forecast of the context window, drawn in the band above the prompt.",
+  "version": "0.2.0",
+  "description": "A live forecast of the context window against auto-compact, with the 5-hour and weekly rate limits, drawn in the band above the prompt.",
   "author": {
     "name": "Ruisi Lu",
     "url": "https://github.com/Ruisi-Lu"

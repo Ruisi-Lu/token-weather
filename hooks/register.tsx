@@ -1,12 +1,59 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import { barFor, formatDelta, formatTokens, record, sampleOf, tokensOf, weatherFor } from './forecast'
+import {
+  barFor,
+  compactAtOf,
+  formatDelta,
+  formatLimit,
+  formatTokens,
+  limitColor,
+  limitOf,
+  limitsOf,
+  percentOf,
+  record,
+  sampleOf,
+  tokensOf,
+  weatherFor,
+} from './forecast'
 
 const samples = atom({ plugin: 'token-weather', key: 'samples' } as const, [])
 const turn = atom({ plugin: 'token-weather', key: 'turn' } as const, null)
+const compactAt = atom({ plugin: 'token-weather', key: 'compactAt' } as const, null)
+const limits = atom({ plugin: 'token-weather', key: 'limits' } as const, [])
+
+// The auto-compact point, from the local /context estimate; it sends no request.
+async function refreshCompactAt($: EngineInterface): Promise<void> {
+  try {
+    const { context } = await $.session.usage({ breakdown: 'summary' })
+    const at = compactAtOf(context.breakdown)
+    await update($, compactAt, () => at)
+  } catch {
+    // Without a reading the band measures against the whole window.
+  }
+}
 
 export const register: Register = on => {
+  // Redraws the band each minute so the rate-limit countdowns stay current.
+  let tick: Timer | undefined
+
+  on('session.start', async ($, e, next) => {
+    const result = await next(e)
+
+    tick?.cancel()
+    tick = $.clock.every(60_000, () => $.ui.invalidate('ui.render'))
+
+    await refreshCompactAt($)
+    try {
+      const { rateLimits } = await $.session.usage()
+      await update($, limits, () => limitsOf(rateLimits))
+    } catch {
+      // The windows arrive with the first measurement instead.
+    }
+
+    return result
+  })
+
   on('turn.start', async ($, e, next) => {
     await update($, turn, () => e.turnId)
 
@@ -40,14 +87,24 @@ export const register: Register = on => {
         const sample = sampleOf(e.context, list.at(-1)?.turnId ?? '')
         return sample === null ? list : record(list, sample)
       })
+      // The model, and with it the compact point, can change between turns.
+      await refreshCompactAt($)
+    }
+    if (e.changed.includes('rateLimits')) {
+      await update($, limits, () => limitsOf(e.rateLimits))
     }
 
     return next(e)
   })
 
-  on('session.end', { reason: 'clear' }, async ($, e, next) => {
-    await update($, samples, () => [])
-    await update($, turn, () => null)
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      await update($, samples, () => [])
+      await update($, turn, () => null)
+    } else {
+      tick?.cancel()
+      tick = undefined
+    }
 
     return next(e)
   })
@@ -58,15 +115,35 @@ export const register: Register = on => {
     }
 
     const list = await read($, samples)
+    const at = await read($, compactAt)
+    const windows = await read($, limits)
+    const now = windows.length > 0 ? await $.clock.now() : 0
     const latest = list.at(-1)
     const { Box, Text } = $.ui.resolve(e)
 
+    const window = latest?.window ?? (await $.session.usage()).context.window
+    const limit = limitOf(window, at)
+    const scale = (
+      <Text>
+        {formatTokens(limit)}
+        {limit < window && <Text dimColor> compact · {formatTokens(window)} max</Text>}
+      </Text>
+    )
+    const rateLimits = windows.map(w => (
+      <Text>
+        {'  '}
+        <Text color={limitColor(w.percentUsed)}>{formatLimit(w, now)}</Text>
+      </Text>
+    ))
+
     if (latest === undefined) {
-      const { context } = await $.session.usage()
       return (
         <Box>
-          <Text wrap="truncate-end" dimColor>
-            ☀ Clear{'  '}— / {formatTokens(context.window)}{'  '}waiting for the first response
+          <Text wrap="truncate-end">
+            <Text dimColor>☀ Clear{'  '}— / </Text>
+            {scale}
+            <Text dimColor>{'  '}waiting for the first response</Text>
+            {rateLimits}
           </Text>
         </Box>
       )
@@ -74,7 +151,8 @@ export const register: Register = on => {
 
     const previous = list.at(-2)
     const isLive = e.props.isWorking && latest.turnId === (await read($, turn))
-    const weather = weatherFor(latest.percent)
+    const percent = percentOf(latest.tokens, limit)
+    const weather = weatherFor(percent)
 
     return (
       <Box>
@@ -84,18 +162,21 @@ export const register: Register = on => {
           </Text>
           <Text>
             {'  '}
-            {latest.percent}% · {formatTokens(latest.tokens)} / {formatTokens(latest.window)}
-            {'  '}
+            {percent}% · {formatTokens(latest.tokens)} /{' '}
           </Text>
-          {list.map(sample => (
-            <Text color={weatherFor(sample.percent).color}>{barFor(sample.percent)}</Text>
-          ))}
+          {scale}
+          <Text>{'  '}</Text>
+          {list.map(sample => {
+            const p = percentOf(sample.tokens, limitOf(sample.window, at))
+            return <Text color={weatherFor(p).color}>{barFor(p)}</Text>
+          })}
           {previous !== undefined && (
             <Text dimColor>
               {'  '}
               {formatDelta(latest.tokens - previous.tokens, isLive ? 'this turn' : 'last turn')}
             </Text>
           )}
+          {rateLimits}
         </Text>
       </Box>
     )
